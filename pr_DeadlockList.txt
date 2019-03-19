@@ -1,0 +1,123 @@
+CREATE PROCEDURE pr_Deadlock_List
+/******************************************************************************
+** File: 
+** Name: pr_Deadlock_List
+** Desc: Lists recent deadlocks.
+*/
+
+AS
+BEGIN
+	DECLARE @Deadlocks TABLE
+	(
+		RowID INT IDENTITY(1,1),
+		LocalTime DATETIME,
+		DeadlockReport NVARCHAR(4000),
+		Proc1 NVARCHAR(300) NULL,
+		Line1 INT NULL,
+		Proc2 NVARCHAR(300) NULL,
+		Line2 INT NULL,
+		PRIMARY KEY(RowID)
+	);
+	DECLARE @Loop INT;
+	DECLARE @Count INT;
+	DECLARE @Proc1 NVARCHAR(300);
+	DECLARE @Proc2 NVARCHAR(300);
+	DECLARE @Line1 INT;
+	DECLARE @Line2 INT;
+	DECLARE @Search1 INT;
+	DECLARE @Search2 INT;
+	DECLARE @Search3 INT;
+	DECLARE @Search4 INT;
+	DECLARE @DeadlockReport NVARCHAR(4000);
+	
+	SET NOCOUNT ON;
+    WITH
+      --get full path to current system_health trace file
+      CurrentSystemHealthTraceFile AS (
+        SELECT CAST(target_data AS xml).value('(/EventFileTarget/File/@name)[1]', 'varchar(255)') AS FileName
+        FROM sys.dm_xe_session_targets
+        WHERE
+            target_name = 'event_file'
+            AND CAST(target_data AS xml).value('(/EventFileTarget/File/@name)[1]', 'varchar(255)') LIKE '%\system[_]health%'
+    )
+      --get trace folder name and add base name of system_health trace file with wildcard
+    , BaseSystemHealthFileName AS (
+        SELECT 
+            REVERSE(SUBSTRING(REVERSE(FileName), CHARINDEX(N'\', REVERSE(FileName)), 255)) + N'system_health*.xel' AS FileNamePattern
+        FROM CurrentSystemHealthTraceFile
+        )
+      --get xml_deadlock_report events from all system_health trace files
+    , DeadLockReports AS (
+        SELECT CAST(event_data AS xml) AS event_data
+        FROM BaseSystemHealthFileName
+        CROSS APPLY sys.fn_xe_file_target_read_file ( FileNamePattern, NULL, NULL, NULL) AS xed
+        WHERE xed.object_name like 'xml_deadlock_report'
+    )
+	--display 10 most recent deadlocks
+	INSERT INTO @Deadlocks (LocalTime,DeadlockReport)
+	SELECT DATEADD(hour, DATEDIFF(hour, SYSUTCDATETIME(), SYSDATETIME()), event_data.value('(/event/@timestamp)[1]', 'datetime2')) AS LocalTime
+		, CONVERT(NVARCHAR(4000),event_data) AS DeadlockReport
+	FROM DeadLockReports
+	ORDER BY LocalTime ASC;
+
+	SELECT @Count = COUNT(*) FROM @Deadlocks;
+	SET @Loop = 1;
+	WHILE @Loop <= @Count
+	BEGIN
+		SELECT @DeadlockReport = DeadlockReport
+		FROM @Deadlocks
+		WHERE RowID = @Loop;
+		SET @Proc1 = NULL;
+		SET @Proc2 = NULL;
+		SET @Line1 = NULL;
+		SET @Line2 = NULL;
+		SET @Search1 = CHARINDEX('<frame procname=',@DeadlockReport);
+		IF @Search1 > 0
+		BEGIN
+			SET @Search2 = CHARINDEX('"',@DeadlockReport,@search1+17);
+			IF @Search2 > 0
+			BEGIN
+				SET @Proc1 = SUBSTRING(@DeadlockReport,@search1+17,@Search2-@Search1-17);
+				SET @Search2 = CHARINDEX('<process ',@DeadlockReport,@Search1);
+				IF @Search2 > 0
+				BEGIN
+					SET @Search2 = CHARINDEX('<frame procname=',@DeadlockReport,@Search2);
+					SET @Search3 = CHARINDEX(' line="',@DeadlockReport,@Search1);
+					IF @Search3 > 0 AND @Search3 < @Search2
+					BEGIN
+						SET @Search4 = CHARINDEX('"',@DeadlockReport,@Search3+7);
+						IF @Search4 > 0
+						BEGIN
+							SET @Line1 = CONVERT(INT,SUBSTRING(@DeadlockReport,@search3+7,@Search4-@Search3-7));
+						END;
+					END;
+					SET @Search3 = CHARINDEX('"',@DeadlockReport,@Search2+17);
+					IF @Search3 > 0
+					BEGIN
+						SET @Proc2 = SUBSTRING(@DeadlockReport,@Search2+17,@Search3-@Search2-17);
+						SET @Search3 = CHARINDEX(' line="',@DeadlockReport,@Search2);
+						IF @Search3 > 0
+						BEGIN
+							SET @Search4 = CHARINDEX('"',@DeadlockReport,@Search3+7);
+							IF @Search4 > 0
+							BEGIN
+								SET @Line2 = CONVERT(INT,SUBSTRING(@DeadlockReport,@search3+7,@Search4-@Search3-7));
+							END;
+						END;
+					END;
+				END;
+			END;		
+		END;
+		UPDATE @Deadlocks
+		SET Proc1 = @Proc1,
+		Proc2 = @Proc2,
+		Line1 = @Line1,
+		Line2 = @Line2
+		WHERE RowID = @Loop;
+		SET @Loop = @Loop + 1;
+	END;
+
+	SELECT LocalTime,Proc1,Line1,Proc2,Line2,DeadlockReport
+	FROM @Deadlocks;
+END
+GO

@@ -1,0 +1,106 @@
+CREATE PROCEDURE pr_Deadlock_Test
+/******************************************************************************
+** File: 
+** Name: pr_Deadlock_Test
+** Desc: Open two query windows and run this procedure in both windows at the
+**       same time to cause a deadlock. 
+******************************************************************************
+*/
+AS
+BEGIN
+	SET NOCOUNT ON
+	DECLARE @ErrorMessage NVARCHAR(4000);  
+	DECLARE @ErrorSeverity INT;  
+	DECLARE @ErrorState INT;
+	DECLARE @ErrorNumber INT;
+	DECLARE @ErrorLine INT;
+	DECLARE @CreatedTables BIT = 0;	
+	DECLARE @TranCount INT = 0;
+	-- These are the tables that will be deadlocking.
+    IF OBJECT_ID('dbo.DeadLock1','U') IS NULL
+	BEGIN
+		CREATE TABLE dbo.Deadlock1
+		(
+			DeadLockID INT IDENTITY(1,1),
+			Deadlock VARCHAR(50),
+			PRIMARY KEY(DeadLockID)
+		);
+		SET @CreatedTables = 1;
+	END;
+
+	IF OBJECT_ID('dbo.Deadlock2','U') IS NULL
+	BEGIN
+		CREATE TABLE dbo.Deadlock2
+		(
+			DeadLockID INT IDENTITY(1,1),
+			Deadlock VARCHAR(50),
+			PRIMARY KEY(DeadLockID)
+		);
+		SET @CreatedTables = 1;
+	END;
+	
+	BEGIN TRY		
+	IF @CreatedTables = 0
+	BEGIN
+		-- The tables already exist. Cause a deadlock.
+		BEGIN TRAN T2
+		SET @TranCount = @TranCount + 1;
+		-- A deadlock happens because Deadlock2 is updated before Deadlock1.
+		UPDATE dbo.Deadlock2 SET Deadlock = 'Row 3';
+		UPDATE dbo.Deadlock1 SET Deadlock = 'Row 3';
+		SET @TranCount = @TranCount - 1;
+		COMMIT TRAN T2
+	END ELSE
+	BEGIN
+		-- This is the first time this procedure has been run
+		-- because the tables needed to be created.
+		INSERT INTO dbo.Deadlock1(Deadlock) VALUES('Row 1');
+		INSERT INTO dbo.Deadlock2(Deadlock) VALUES('Row 1');
+
+		BEGIN TRAN T1
+		SET @TranCount = @TranCount + 1;
+		UPDATE dbo.Deadlock1 SET Deadlock = 'Row 2';
+		WAITFOR DELAY '00:01:00'; -- Wait for 1 minute. This gives time for the other sql window to run this procedure.
+		UPDATE dbo.Deadlock2 SET Deadlock = 'Row 2';
+		SET @TranCount = @TranCount - 1;
+		COMMIT TRAN T1
+	END;
+	END TRY
+	BEGIN CATCH
+		SET @ErrorNumber = ERROR_NUMBER();
+        SET @ErrorLine = ERROR_LINE();
+        SET @ErrorMessage = 'Error ' + CONVERT(VARCHAR,@ErrorNumber) + ':' + ERROR_MESSAGE() + ' on line ' + CONVERT(VARCHAR,@ErrorLine);
+        SET @ErrorSeverity = ERROR_SEVERITY();
+        SET @ErrorState = ERROR_STATE();
+        -- Try to rollback the transaction.
+		IF @TranCount > 0
+		BEGIN
+			IF @CreatedTables = 0
+			BEGIN
+				ROLLBACK TRAN T2;
+			END ELSE
+			BEGIN
+				ROLLBACK TRAN T1;
+			END;
+		END;		
+		-- Try to delete the tables.
+		IF OBJECT_ID('dbo.DeadLock1','U') IS NOT NULL
+		BEGIN
+			DROP TABLE dbo.Deadlock1;
+		END;
+		IF OBJECT_ID('dbo.DeadLock2','U') IS NOT NULL
+		BEGIN
+			DROP TABLE dbo.Deadlock2;
+		END;
+        RAISERROR(@ErrorMessage,@ErrorSeverity,@ErrorState);
+	END CATCH
+	-- If successful, try to delete the tables.
+	IF OBJECT_ID('dbo.DeadLock1','U') IS NOT NULL
+	BEGIN
+		DROP TABLE dbo.Deadlock1;
+	END;
+	IF OBJECT_ID('dbo.DeadLock2','U') IS NOT NULL
+	BEGIN
+		DROP TABLE dbo.Deadlock2;
+	END;
+END
